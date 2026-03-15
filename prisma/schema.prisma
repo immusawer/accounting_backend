@@ -1,0 +1,12 @@
+// prisma/schema.prisma
+// Complete Chart of Accounts Design - ALL ACCOUNTS in One Model
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
