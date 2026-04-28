@@ -1,0 +1,65 @@
+# Optional infrastructure for local development.
+#
+#   docker compose up -d postgres          # start only Postgres
+#   docker compose up -d postgres minio    # also start MinIO (needed for attachments)
+#   docker compose --profile storage up -d # shorthand to bring up the storage stack
+#
+# Set STORAGE_ENABLED=true in .env once MinIO is running to turn on uploads.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: accounting-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-0000}
+      POSTGRES_DB: ${DB_NAME:-accounting_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  # Object storage for expense/payment/employee attachments. S3-compatible.
+  # Web console: http://localhost:9001 (login with the root user/password).
+  minio:
+    image: minio/minio:latest
+    container_name: accounting-minio
+    profiles: ["storage"]
+    ports:
+      - "${STORAGE_PORT:-9000}:9000"   # API
+      - "9001:9001"                    # Web console
+    environment:
+      MINIO_ROOT_USER: ${STORAGE_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${STORAGE_SECRET_KEY:-minioadmin}
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # One-shot init container: waits for MinIO then creates the bucket
+  # (idempotent — safe to re-run).
+  minio-setup:
+    image: minio/mc:latest
+    container_name: accounting-minio-setup
+    profiles: ["storage"]
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until (/usr/bin/mc alias set local http://minio:9000 ${STORAGE_ACCESS_KEY:-minioadmin} ${STORAGE_SECRET_KEY:-minioadmin}) do
+        echo 'Waiting for MinIO...' && sleep 2;
+      done;
+      /usr/bin/mc mb -p local/${STORAGE_BUCKET:-accounting-attachments} 2>/dev/null || true;
+      echo 'MinIO bucket ready.';
+      exit 0;
+      "
+
+volumes:
+  postgres_data:
+  minio_data:

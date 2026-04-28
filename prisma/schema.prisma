@@ -10,3 +10,569 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum user_status {
+  active
+  deactive
+}
+
+enum AccountType {
+  main
+  sub1
+  sub2
+  sub3
+}
+
+enum AccountCategory {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+}
+
+// ─── Attachments ────────────────────────────────────────────────────────────
+// One table per owner keeps foreign-key integrity and lets `onDelete: Cascade`
+// clean up attachments automatically. To add a new owner type:
+//   1. Add a new <x>_attachments model below with the same shape
+//   2. Add a back-relation on the owner model ( <x>_attachments[] )
+//   3. Register it in buildDomains() — see src/attachments/attachment-domains.ts
+// `url` holds the storage object key (bucket path), NOT a public URL. The
+// backend issues presigned download URLs on demand from that key.
+
+model expense_attachments {
+  id          Int      @id @default(autoincrement())
+  url         String   @db.VarChar(512)
+  name        String   @db.VarChar(255)
+  size        Int      @default(0)
+  mime_type   String?  @db.VarChar(128)
+  expense_id  Int
+  expense     expense  @relation(fields: [expense_id], references: [id], onDelete: Cascade)
+  uploaded_at DateTime @default(now())
+
+  @@index([expense_id])
+}
+
+model employee_attachments {
+  id          Int      @id @default(autoincrement())
+  url         String   @db.VarChar(512)
+  name        String   @db.VarChar(255)
+  size        Int      @default(0)
+  mime_type   String?  @db.VarChar(128)
+  employee_id Int
+  employee    employee @relation(fields: [employee_id], references: [id], onDelete: Cascade)
+  uploaded_at DateTime @default(now())
+
+  @@index([employee_id])
+}
+
+model payment_attachments {
+  id          Int      @id @default(autoincrement())
+  url         String   @db.VarChar(512)
+  name        String   @db.VarChar(255)
+  size        Int      @default(0)
+  mime_type   String?  @db.VarChar(128)
+  payment_id  Int
+  payment     Payment  @relation(fields: [payment_id], references: [id], onDelete: Cascade)
+  uploaded_at DateTime @default(now())
+
+  @@index([payment_id])
+}
+
+// ─── Audit Log ──────────────────────────────────────────────────────────────
+
+model audit_log {
+  id         Int      @id @default(autoincrement())
+  user_id    Int?
+  user_email String?  @db.VarChar(128)
+  user_name  String?  @db.VarChar(128)
+  action     String   @db.VarChar(20) // CREATE, UPDATE, DELETE
+  module     String   @db.VarChar(50) // e.g. "payment", "expense", "invoice"
+  record_id  Int? // id of the affected record
+  summary    String?  @db.VarChar(500) // human-readable summary
+  old_data   Json? // snapshot before change
+  new_data   Json? // snapshot after change
+  ip         String?  @db.VarChar(45)
+  user_agent String?  @db.VarChar(500)
+  created_at DateTime @default(now())
+
+  @@index([user_id])
+  @@index([module])
+  @@index([action])
+  @@index([created_at])
+}
+
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  PARTIALLY_PAID
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+enum PaymentMethod {
+  CASH
+  BANK_TRANSFER
+  CREDIT_CARD
+}
+
+// PaymentStatus is a 3-step review workflow:
+//   PENDING   → freshly recorded, no journal entries yet, can be edited/deleted
+//   REVIEWED  → accountant has verified; journal entries have been generated
+//   APPROVED  → final sign-off; no further changes allowed
+//
+// Transitions: PENDING → REVIEWED → APPROVED (one-way).
+// Backward transitions are blocked in the service layer.
+enum PaymentStatus {
+  PENDING
+  REVIEWED
+  APPROVED
+}
+
+enum InvoiceTransactionStatus {
+  reverted
+  pending_revert
+}
+
+// GeneralJournalCurrency enum removed — currency is now a dynamic String
+// to support any currency from the currency_setting table
+
+model currency_setting {
+  id           Int      @id @default(autoincrement())
+  code         String   @unique @db.VarChar(10)
+  name         String   @db.VarChar(100)
+  symbol       String?  @db.VarChar(10)
+  exchangeRate Float    @default(1)
+  isBase       Boolean  @default(false)
+  isActive     Boolean  @default(true)
+  updatedAt    DateTime @updatedAt
+  createdAt    DateTime @default(now())
+}
+
+model app_setting {
+  id    Int    @id @default(autoincrement())
+  key   String @unique @db.VarChar(100)
+  value String @db.VarChar(500)
+}
+
+model user {
+  id            Int           @id @default(autoincrement())
+  username      String        @unique @db.VarChar(64)
+  first_name    String?       @db.VarChar(64)
+  last_name     String?       @db.VarChar(64)
+  email         String        @unique @db.VarChar(64)
+  password      String        @db.VarChar(128)
+  profile_image String?       @db.VarChar(512)
+  role_id       Int?
+  status        user_status   @default(deactive)
+  created_at    DateTime?     @default(now())
+  created_by    Int?
+  updated_at    DateTime?     @updatedAt
+  updated_by    Int?
+  permissions   permissions[] @relation("UserPermissions")
+  role          roles?        @relation("UserRole", fields: [role_id], references: [id])
+
+  @@index([created_by])
+  @@index([updated_by])
+  @@index([role_id])
+}
+
+model permissions {
+  id         Int       @id @default(autoincrement())
+  name       String    @db.VarChar(255)
+  label      String?   @db.VarChar(255)
+  group_name String    @db.VarChar(255)
+  created_at DateTime? @default(now())
+  updated_at DateTime? @updatedAt
+  users      user[]    @relation("UserPermissions")
+  roles      roles[]   @relation("PermissionsRoles")
+
+  @@unique([name, group_name])
+}
+
+model roles {
+  id          Int           @id @default(autoincrement())
+  name        String        @unique @db.VarChar(255)
+  created_at  DateTime?     @default(now())
+  created_by  Int?
+  updated_at  DateTime?     @updatedAt
+  updated_by  Int?
+  deleted_at  DateTime?     @db.Timestamptz(6)
+  deleted_by  Int?
+  users       user[]        @relation("UserRole")
+  permissions permissions[] @relation("PermissionsRoles")
+}
+
+model Customer {
+  id          Int     @id @default(autoincrement())
+  // Basic Info
+  name        String
+  email       String? @unique
+  phone       String?
+  companyName String?
+
+  // Accounting Info
+  currency    String @default("USD")
+  creditLimit Float  @default(0)
+  balance     Float  @default(0)
+
+  // Tax / Legal
+  taxNumber String?
+  isTaxable Boolean @default(false)
+
+  // Address
+  billingAddress  String?
+  shippingAddress String?
+  city            String?
+  country         String?
+
+  // Status
+  isActive Boolean @default(true)
+
+  // Soft Delete
+  deletedAt DateTime?
+  deletedBy String?
+
+  // Relations
+  invoices Invoice[]
+  payments Payment[]
+
+  // Metadata
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model product {
+  id          Int       @id @default(autoincrement())
+  name        String
+  description String?
+  sku         String?   @unique
+  price       Float     @default(0)
+  cost        Float     @default(0)
+  taxRate     Float     @default(0)
+  category    String?
+  supplier    String?
+  unit        String    @default("pcs")
+  isActive    Boolean   @default(true)
+  deletedAt   DateTime?
+  deletedBy   String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  invoiceItems InvoiceItem[]
+}
+
+model stock {
+  id          Int       @id @default(autoincrement())
+  name        String
+  description String?
+  type        StockType
+  quantity    Float     @default(1)
+  price       Float     @default(0)
+  totalValue  Float     @default(0)
+  reference   String?
+
+  // Double-entry: which accounts were debited/credited
+  debitAccountId  Int
+  creditAccountId Int
+
+  date       DateTime  @default(now())
+  created_by Int?
+  created_at DateTime  @default(now())
+  deleted_at DateTime?
+  deleted_by Int?
+}
+
+enum StockType {
+  IN
+  OUT
+}
+
+// ─── HR ─────────────────────────────────────────────────────────────────────
+
+model department {
+  id          Int        @id @default(autoincrement())
+  name        String     @unique
+  description String?
+  isActive    Boolean    @default(true)
+  createdAt   DateTime   @default(now())
+  employees   employee[]
+}
+
+model employee {
+  id           Int         @id @default(autoincrement())
+  firstName    String
+  lastName     String
+  email        String?     @unique
+  phone        String?
+  position     String?
+  departmentId Int?
+  department   department? @relation(fields: [departmentId], references: [id])
+  baseSalary   Float       @default(0)
+  currency     String      @default("USD")
+  hireDate     DateTime    @default(now())
+  bankAccount  String?
+  bankName     String?
+  taxId        String?
+  isActive     Boolean     @default(true)
+  deletedAt    DateTime?
+  deletedBy    String?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  salaryPayments salary_payment[]
+  attachments    employee_attachments[]
+
+  @@index([departmentId])
+}
+
+enum SalaryPaymentStatus {
+  PENDING
+  PAID
+  CANCELLED
+}
+
+model salary_payment {
+  id         Int                 @id @default(autoincrement())
+  employeeId Int
+  employee   employee            @relation(fields: [employeeId], references: [id])
+  period     String              @db.VarChar(7) // e.g. "2026-03"
+  baseSalary Float
+  allowances Float               @default(0)
+  deductions Float               @default(0)
+  overtime   Float               @default(0)
+  netSalary  Float
+  currency   String              @default("USD")
+  status     SalaryPaymentStatus @default(PENDING)
+  paidDate   DateTime?
+  reference  String?
+  notes      String?
+
+  debitAccountId  Int
+  creditAccountId Int
+
+  created_by Int?
+  created_at DateTime  @default(now())
+  deleted_at DateTime?
+  deleted_by Int?
+
+  @@unique([employeeId, period])
+  @@index([employeeId])
+}
+
+model expense {
+  id          Int     @id @default(autoincrement())
+  name        String?
+  description String?
+  amount      Float
+  category    String?
+  vendor      String?
+  currency    String  @default("USD")
+  reference   String?
+
+  debitAccountId  Int
+  creditAccountId Int
+
+  date       DateTime  @default(now())
+  created_by Int?
+  created_at DateTime  @default(now())
+  deleted_at DateTime?
+  deleted_by Int?
+
+  attachments expense_attachments[]
+}
+
+model Invoice {
+  id Int @id @default(autoincrement())
+
+  invoiceNumber String   @unique
+  customerId    Int
+  customer      Customer @relation(fields: [customerId], references: [id])
+
+  issueDate DateTime  @default(now())
+  dueDate   DateTime?
+
+  status InvoiceStatus @default(DRAFT)
+
+  // Money
+  subtotal   Float @default(0)
+  tax        Float @default(0)
+  discount   Float @default(0)
+  total      Float @default(0)
+  paidAmount Float @default(0)
+  balanceDue Float @default(0)
+
+  currency String @default("USD")
+
+  // Notes
+  notes String?
+
+  // Soft delete
+  deletedAt DateTime?
+  deletedBy String?
+
+  // Relations
+  items    InvoiceItem[]
+  payments Payment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model InvoiceItem {
+  id Int @id @default(autoincrement())
+
+  invoiceId Int
+  invoice   Invoice @relation(fields: [invoiceId], references: [id])
+
+  productId Int?
+  product   product? @relation(fields: [productId], references: [id])
+
+  description String
+  quantity    Float
+  unitPrice   Float
+
+  taxRate  Float @default(0)
+  discount Float @default(0)
+
+  total Float
+
+  createdAt DateTime @default(now())
+
+  @@index([productId])
+}
+
+model Payment {
+  id         Int      @id @default(autoincrement())
+  customerId Int
+  customer   Customer @relation(fields: [customerId], references: [id])
+
+  invoiceId Int?
+  invoice   Invoice? @relation(fields: [invoiceId], references: [id])
+
+  amount   Float
+  currency String @default("USD")
+
+  paymentDate   DateTime      @default(now())
+  paymentMethod PaymentMethod
+
+  reference String? // bank ref, txn id, etc
+  notes     String?
+
+  status PaymentStatus @default(PENDING)
+
+  // Soft delete
+  deletedAt DateTime?
+  deletedBy String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  attachments payment_attachments[]
+}
+
+model chart_of_accounts {
+  id           Int                 @id @default(autoincrement())
+  account_name String
+  isVendor     Boolean             @default(false)
+  code         String              @unique
+  type         AccountType
+  category     AccountCategory?
+  parent_id    Int?
+  parent       chart_of_accounts?  @relation("ParentChild", fields: [parent_id], references: [id])
+  children     chart_of_accounts[] @relation("ParentChild")
+  company_id   Int?
+
+  created_at DateTime  @default(now()) @db.Timestamp
+  created_by Int?
+  deleted_at DateTime? @db.Timestamptz(6)
+  deleted_by Int?
+  updated_at DateTime? @updatedAt
+  updated_by Int?
+
+  transactions_data transactions_data[]
+
+  @@index([parent_id])
+  @@index([company_id])
+}
+
+model general_journal {
+  id             Int       @id @default(autoincrement())
+  journal_number String    @unique
+  journal_date   DateTime  @db.Timestamptz(6)
+  currency       String    @default("USD") @db.VarChar(10)
+  exchange_rate  Decimal   @default(1) @db.Decimal(18, 6)
+  remark         String?   @db.VarChar(500)
+  created_at     DateTime  @default(now()) @db.Timestamp
+  created_by     Int?
+  updated_at     DateTime? @updatedAt
+  updated_by     Int?
+  deleted_at     DateTime? @db.Timestamptz(6)
+  deleted_by     Int?
+
+  transactions_data transactions_data[]
+}
+
+model voucher_type {
+  id                  Int       @id @default(autoincrement())
+  code                String    @unique @db.VarChar(20)
+  type                String    @db.VarChar(100)
+  last_voucher_number String?   @db.VarChar(255)
+  remark              String?   @db.VarChar(500)
+  created_at          DateTime  @default(now()) @db.Timestamp
+  created_by          Int?
+  updated_at          DateTime? @updatedAt
+  updated_by          Int?
+  deleted_at          DateTime? @db.Timestamptz(6)
+  deleted_by          Int?
+
+  transactions_data transactions_data[]
+}
+
+model transactions_data {
+  id           Int           @id @default(autoincrement())
+  voucher_date DateTime      @db.Timestamptz(6)
+  voucher_id   Int?
+  voucher      voucher_type? @relation(fields: [voucher_id], references: [id])
+
+  voucher_number String? @db.VarChar(255)
+  system_ref     String? @db.VarChar(255)
+
+  company_id Int?
+  cpt_id     Int?
+
+  from             String? @db.VarChar(255)
+  to               String? @db.VarChar(255)
+  from_location_id Int?
+  to_location_id   Int?
+
+  revert_status InvoiceTransactionStatus?
+
+  account_id       Int
+  chart_of_account chart_of_accounts @relation(fields: [account_id], references: [id])
+
+  general_journal_id Int?
+  general_journal    general_journal? @relation(fields: [general_journal_id], references: [id])
+
+  base_currency_credit Decimal @default(0) @db.Decimal(18, 2)
+  base_currency_debit  Decimal @default(0) @db.Decimal(18, 2)
+
+  currency      String  @db.VarChar(10)
+  exchange_rate Decimal @default(1) @db.Decimal(18, 6)
+  debit         Decimal @default(0) @db.Decimal(18, 2)
+  credit        Decimal @default(0) @db.Decimal(18, 2)
+
+  narration String? @db.VarChar(255)
+  remark    String? @db.VarChar(255)
+
+  created_at DateTime  @default(now()) @db.Timestamp
+  created_by Int?
+  deleted_at DateTime? @db.Timestamptz(6)
+  deleted_by Int?
+  updated_at DateTime? @updatedAt
+  updated_by Int?
+
+  @@index([account_id])
+  @@index([general_journal_id])
+  @@index([voucher_id])
+}
