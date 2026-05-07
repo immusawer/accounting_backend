@@ -49,7 +49,7 @@ export class CustomerService {
         email: data.email?.toLowerCase().trim() || null,
         phone: data.phone?.trim() || null,
         companyName: data.companyName?.trim() || null,
-        currency: data.currency || 'USD',
+        currency: data.currency || 'AFN',
         creditLimit: data.creditLimit ?? 0,
         taxNumber: data.taxNumber?.trim() || null,
         isTaxable: data.isTaxable ?? false,

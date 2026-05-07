@@ -123,7 +123,7 @@ export class DashboardService {
       ),
     ]);
 
-    const baseCurrency = baseSetting?.value ?? 'USD';
+    const baseCurrency = baseSetting?.value ?? 'AFN';
 
     // ✅ Format category totals
     const categoryTotals = categories.reduce(

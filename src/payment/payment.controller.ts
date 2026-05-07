@@ -59,11 +59,7 @@ export class PaymentController {
     return this.paymentService.update(id, data);
   }
 
-  // Review / approve workflow. Two distinct permissions so you can give
-  // a junior accountant "review" rights without letting them sign off.
-  // Both permissions are accepted on the same route; the service enforces
-  // which transitions each status allows.
-  @RequirePermission('payments.review', 'payments.approve')
+  @RequirePermission('payments.change_status')
   @AuditLog({ action: 'UPDATE', module: 'payment' })
   @Patch(':id/status')
   updateStatus(

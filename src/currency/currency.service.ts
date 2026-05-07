@@ -20,7 +20,7 @@ export class CurrencyService {
     const base = await this.prisma.currency_setting.findFirst({
       where: { isBase: true },
     });
-    return base || { code: 'USD', name: 'US Dollar', exchangeRate: 1 };
+    return base || { code: 'AFN', name: 'Afghan Afghani', exchangeRate: 1 };
   }
 
   async getExchangeRate(currencyCode: string): Promise<number> {
@@ -137,24 +137,22 @@ export class CurrencyService {
   }
 
   async seed() {
+    // AFN is the base. Other rates are <currency-amount> per 1 AFN, so the
+    // numbers below are reciprocals of typical "per USD" rates (e.g. 1 USD ≈
+    // 70 AFN ⇒ USD/AFN = 1/70 ≈ 0.0143).
     const defaults = [
       {
-        code: 'USD',
-        name: 'US Dollar',
-        symbol: '$',
+        code: 'AFN',
+        name: 'Afghan Afghani',
+        symbol: '؋',
         exchangeRate: 1,
         isBase: true,
       },
-      { code: 'AED', name: 'UAE Dirham', symbol: 'د.إ', exchangeRate: 3.6725 },
-      { code: 'OMR', name: 'Omani Rial', symbol: 'ر.ع.', exchangeRate: 0.3845 },
-      { code: 'GEL', name: 'Georgian Lari', symbol: '₾', exchangeRate: 2.65 },
-      {
-        code: 'CAD',
-        name: 'Canadian Dollar',
-        symbol: 'C$',
-        exchangeRate: 1.36,
-      },
-      { code: 'AFN', name: 'Afghan Afghani', symbol: '؋', exchangeRate: 68.5 },
+      { code: 'USD', name: 'US Dollar', symbol: '$', exchangeRate: 0.0143 },
+      { code: 'AED', name: 'UAE Dirham', symbol: 'د.إ', exchangeRate: 0.0525 },
+      { code: 'OMR', name: 'Omani Rial', symbol: 'ر.ع.', exchangeRate: 0.0055 },
+      { code: 'GEL', name: 'Georgian Lari', symbol: '₾', exchangeRate: 0.0379 },
+      { code: 'CAD', name: 'Canadian Dollar', symbol: 'C$', exchangeRate: 0.0194 },
     ];
     for (const d of defaults) {
       await this.prisma.currency_setting.upsert({
@@ -166,7 +164,7 @@ export class CurrencyService {
     await this.prisma.app_setting.upsert({
       where: { key: 'baseCurrency' },
       update: {},
-      create: { key: 'baseCurrency', value: 'USD' },
+      create: { key: 'baseCurrency', value: 'AFN' },
     });
     return { message: 'Currencies seeded' };
   }

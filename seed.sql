@@ -44,20 +44,21 @@ INSERT INTO permissions (name, label, group_name, created_at) VALUES
   ('create', 'Create Invoices', 'sales', NOW()),
   ('update', 'Update Invoices', 'sales', NOW()),
   ('delete', 'Delete Invoices', 'sales', NOW()),
+  ('change_status', 'Change Invoice Status', 'sales', NOW()),
 
   -- Purchases
   ('view', 'View Expenses', 'purchases', NOW()),
   ('create', 'Create Expenses', 'purchases', NOW()),
   ('update', 'Update Expenses', 'purchases', NOW()),
   ('delete', 'Delete Expenses', 'purchases', NOW()),
+  ('change_status', 'Change Expense Status', 'purchases', NOW()),
 
   -- Payments
   ('view', 'View Payments', 'payments', NOW()),
   ('create', 'Create Payments', 'payments', NOW()),
   ('update', 'Update Payments', 'payments', NOW()),
   ('delete', 'Delete Payments', 'payments', NOW()),
-  ('review', 'Review Payments (generate journal)', 'payments', NOW()),
-  ('approve', 'Approve Payments (final sign-off)', 'payments', NOW()),
+  ('change_status', 'Change Payment Status', 'payments', NOW()),
 
   -- Accounting
   ('view', 'View Accounting', 'accounting', NOW()),
@@ -80,12 +81,14 @@ INSERT INTO permissions (name, label, group_name, created_at) VALUES
   ('create', 'Create Products & Stock', 'inventory', NOW()),
   ('update', 'Update Products', 'inventory', NOW()),
   ('delete', 'Delete Products & Stock', 'inventory', NOW()),
+  ('change_status', 'Change Inventory Status', 'inventory', NOW()),
 
   -- HR
   ('view', 'View HR & Payroll', 'hr', NOW()),
   ('create', 'Create Employees & Salary', 'hr', NOW()),
   ('update', 'Update Employees', 'hr', NOW()),
-  ('delete', 'Delete Employees & Salary', 'hr', NOW())
+  ('delete', 'Delete Employees & Salary', 'hr', NOW()),
+  ('change_status', 'Change Salary Status', 'hr', NOW())
 
 ON CONFLICT (name, group_name) DO NOTHING;
 

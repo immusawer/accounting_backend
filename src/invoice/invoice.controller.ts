@@ -10,9 +10,12 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
+import { ReviewStatus } from '@prisma/client';
 import { InvoiceService } from './invoice.service';
 import { CreateInvoiceDto, UpdateInvoiceDto } from './dto/invoice.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { PermissionGuard } from '../auth/guards/permission.guard';
+import { RequirePermission } from '../auth/decorators/require-permission.decorator';
 import { AuditLog } from '../audit-log/audit-log.interceptor';
 
 interface AuthRequest extends Request {
@@ -20,26 +23,30 @@ interface AuthRequest extends Request {
 }
 
 @Controller('invoices')
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionGuard)
 export class InvoiceController {
   constructor(private readonly invoiceService: InvoiceService) {}
 
+  @RequirePermission('sales.view')
   @Get()
   findAll() {
     return this.invoiceService.findAll();
   }
 
+  @RequirePermission('sales.view')
   @Get(':id')
   findOne(@Param('id', ParseIntPipe) id: number) {
     return this.invoiceService.findOne(id);
   }
 
+  @RequirePermission('sales.create')
   @AuditLog({ action: 'CREATE', module: 'invoice' })
   @Post()
   create(@Body() data: CreateInvoiceDto, @Req() req: AuthRequest) {
     return this.invoiceService.create(data, req.user.id);
   }
 
+  @RequirePermission('sales.update')
   @AuditLog({ action: 'UPDATE', module: 'invoice' })
   @Patch(':id')
   update(
@@ -50,6 +57,18 @@ export class InvoiceController {
     return this.invoiceService.update(id, data, req.user.id);
   }
 
+  @RequirePermission('sales.change_status')
+  @AuditLog({ action: 'UPDATE', module: 'invoice' })
+  @Patch(':id/review-status')
+  updateStatus(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: { status: ReviewStatus },
+    @Req() req: AuthRequest,
+  ) {
+    return this.invoiceService.updateStatus(id, body.status, req.user.id);
+  }
+
+  @RequirePermission('sales.delete')
   @AuditLog({ action: 'DELETE', module: 'invoice' })
   @Delete(':id')
   remove(@Param('id', ParseIntPipe) id: number, @Req() req: AuthRequest) {

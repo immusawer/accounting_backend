@@ -3,12 +3,17 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { ReviewStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { ReviewWorkflowService } from '../accounting/review-workflow.service';
 import { CreateProductDto, UpdateProductDto } from './dto/product.dto';
 
 @Injectable()
 export class ProductService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private workflow: ReviewWorkflowService,
+  ) {}
 
   async findAll() {
     return this.prisma.product.findMany({
@@ -46,9 +51,10 @@ export class ProductService {
         category: data.category?.trim() || null,
         supplier: data.supplier?.trim() || null,
         unit: data.unit?.trim() || 'pcs',
+        reviewStatus: 'PENDING',
       },
     });
-    return { message: 'Product created successfully', product };
+    return { message: 'Product created (pending review)', product };
   }
 
   async update(id: number, data: UpdateProductDto) {
@@ -56,6 +62,7 @@ export class ProductService {
       where: { id, deletedAt: null },
     });
     if (!existing) throw new NotFoundException('Product not found');
+    this.workflow.ensureEditable(existing.reviewStatus, 'update');
 
     if (data.sku && data.sku.trim() !== existing.sku) {
       const conflict = await this.prisma.product.findFirst({
@@ -82,11 +89,26 @@ export class ProductService {
     return { message: 'Product updated successfully', product };
   }
 
+  async updateStatus(id: number, next: ReviewStatus, userId?: number) {
+    const existing = await this.prisma.product.findFirst({
+      where: { id, deletedAt: null },
+    });
+    if (!existing) throw new NotFoundException('Product not found');
+
+    this.workflow.validateTransition(existing.reviewStatus, next);
+    const product = await this.prisma.product.update({
+      where: { id },
+      data: { reviewStatus: next },
+    });
+    return { message: `Product moved to ${next}`, product, userId };
+  }
+
   async remove(id: number, deletedBy?: string) {
     const existing = await this.prisma.product.findFirst({
       where: { id, deletedAt: null },
     });
     if (!existing) throw new NotFoundException('Product not found');
+    this.workflow.ensureEditable(existing.reviewStatus, 'delete');
 
     await this.prisma.product.update({
       where: { id },

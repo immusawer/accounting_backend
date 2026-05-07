@@ -2,19 +2,53 @@ import {
   ConflictException,
   Injectable,
   NotFoundException,
+  OnModuleInit,
 } from '@nestjs/common';
+import { ReviewStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  ReviewWorkflowService,
+  systemRef,
+} from '../accounting/review-workflow.service';
 import {
   CreateDepartmentDto,
   CreateEmployeeDto,
   UpdateEmployeeDto,
   CreateSalaryPaymentDto,
 } from './dto/hr.dto';
-import { baseFields } from '../currency/convert';
 
 @Injectable()
-export class HrService {
-  constructor(private prisma: PrismaService) {}
+export class HrService implements OnModuleInit {
+  constructor(
+    private prisma: PrismaService,
+    private workflow: ReviewWorkflowService,
+  ) {}
+
+  onModuleInit() {
+    this.workflow.registerBuilder('SALARY', async (id, tx) => {
+      const p = await tx.salary_payment.findUnique({
+        where: { id },
+        include: {
+          employee: { select: { firstName: true, lastName: true } },
+        },
+      });
+      if (!p || p.deleted_at) return null;
+      const rate = await this.getRate(p.currency);
+      const empName = `${p.employee.firstName} ${p.employee.lastName}`;
+      return {
+        date: p.paidDate ?? p.created_at,
+        voucherNumber: `SAL-${p.id}`,
+        systemRef: systemRef('SALARY', p.id),
+        narration: `Salary ${p.period} - ${empName}`,
+        currency: p.currency,
+        exchangeRate: rate,
+        lines: [
+          { account: { id: p.debitAccountId }, debit: p.netSalary, credit: 0 },
+          { account: { id: p.creditAccountId }, debit: 0, credit: p.netSalary },
+        ],
+      };
+    });
+  }
 
   private async getRate(code: string): Promise<number> {
     const c = await this.prisma.currency_setting.findUnique({
@@ -79,7 +113,7 @@ export class HrService {
         position: data.position?.trim() || null,
         departmentId: data.departmentId || null,
         baseSalary: data.baseSalary,
-        currency: data.currency || 'USD',
+        currency: data.currency || 'AFN',
         hireDate: data.hireDate ? new Date(data.hireDate) : new Date(),
         bankAccount: data.bankAccount?.trim() || null,
         bankName: data.bankName?.trim() || null,
@@ -165,29 +199,106 @@ export class HrService {
     const deductions = data.deductions ?? 0;
     const overtime = data.overtime ?? 0;
     const netSalary = employee.baseSalary + allowances + overtime - deductions;
-    const currency = employee.currency || 'USD';
-    const rate = await this.getRate(currency);
+    const currency = employee.currency || 'AFN';
     const now = new Date();
 
-    const result = await this.prisma.$transaction(async (tx) => {
-      const payment = await tx.salary_payment.create({
-        data: {
-          employeeId: data.employeeId,
-          period: data.period,
-          baseSalary: employee.baseSalary,
-          allowances,
-          deductions,
-          overtime,
-          netSalary,
-          currency,
-          status: 'PAID',
-          paidDate: now,
-          reference: data.reference?.trim() || null,
-          notes: data.notes?.trim() || null,
-          debitAccountId: data.debitAccountId,
-          creditAccountId: data.creditAccountId,
-          created_by: userId,
+    const payment = await this.prisma.salary_payment.create({
+      data: {
+        employeeId: data.employeeId,
+        period: data.period,
+        baseSalary: employee.baseSalary,
+        allowances,
+        deductions,
+        overtime,
+        netSalary,
+        currency,
+        status: 'PAID',
+        reviewStatus: 'PENDING',
+        paidDate: now,
+        reference: data.reference?.trim() || null,
+        notes: data.notes?.trim() || null,
+        debitAccountId: data.debitAccountId,
+        creditAccountId: data.creditAccountId,
+        created_by: userId,
+      },
+      include: {
+        employee: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            position: true,
+            department: { select: { name: true } },
+          },
         },
+      },
+    });
+
+    return { message: 'Salary recorded (pending review)', payment };
+  }
+
+  async updateSalaryPayment(
+    id: number,
+    data: Partial<CreateSalaryPaymentDto>,
+    userId?: number,
+  ) {
+    const existing = await this.prisma.salary_payment.findFirst({
+      where: { id, deleted_at: null },
+    });
+    if (!existing) throw new NotFoundException('Salary payment not found');
+    this.workflow.ensureEditable(existing.reviewStatus, 'update');
+
+    const allowances = data.allowances ?? existing.allowances;
+    const deductions = data.deductions ?? existing.deductions;
+    const overtime = data.overtime ?? existing.overtime;
+    const netSalary =
+      existing.baseSalary + allowances + overtime - deductions;
+
+    const payment = await this.prisma.salary_payment.update({
+      where: { id },
+      data: {
+        allowances,
+        deductions,
+        overtime,
+        netSalary,
+        reference: data.reference?.trim() ?? undefined,
+        notes: data.notes?.trim() ?? undefined,
+        debitAccountId: data.debitAccountId,
+        creditAccountId: data.creditAccountId,
+      },
+      include: {
+        employee: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            position: true,
+            department: { select: { name: true } },
+          },
+        },
+      },
+    });
+    return { message: 'Salary payment updated successfully', payment, userId };
+  }
+
+  async updateSalaryStatus(id: number, next: ReviewStatus, userId?: number) {
+    const existing = await this.prisma.salary_payment.findFirst({
+      where: { id, deleted_at: null },
+    });
+    if (!existing) throw new NotFoundException('Salary payment not found');
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      await this.workflow.applyTransition({
+        kind: 'SALARY',
+        recordId: id,
+        current: existing.reviewStatus,
+        next,
+        tx,
+        userId,
+      });
+      return tx.salary_payment.update({
+        where: { id },
+        data: { reviewStatus: next },
         include: {
           employee: {
             select: {
@@ -200,41 +311,8 @@ export class HrService {
           },
         },
       });
-
-      // Auto-generate transactions_data (double-entry)
-      // Debit: Salary Expense account
-      // Credit: Cash / Bank account
-      const empName = `${employee.firstName} ${employee.lastName}`;
-      const narration = `Salary ${data.period} - ${empName}`;
-      const refNum = `SAL-${payment.id}`;
-
-      await tx.transactions_data.create({
-        data: {
-          voucher_date: now,
-          voucher_number: refNum,
-          system_ref: `SAL:${payment.id}`,
-          account_id: data.debitAccountId,
-          ...baseFields(netSalary, 0, currency, rate),
-          narration,
-          created_by: userId,
-        },
-      });
-      await tx.transactions_data.create({
-        data: {
-          voucher_date: now,
-          voucher_number: refNum,
-          system_ref: `SAL:${payment.id}`,
-          account_id: data.creditAccountId,
-          ...baseFields(0, netSalary, currency, rate),
-          narration,
-          created_by: userId,
-        },
-      });
-
-      return payment;
     });
-
-    return { message: 'Salary paid & transactions generated', payment: result };
+    return { message: `Salary payment moved to ${next}`, payment: updated };
   }
 
   async deleteSalaryPayment(id: number, userId?: number) {
@@ -242,24 +320,12 @@ export class HrService {
       where: { id, deleted_at: null },
     });
     if (!existing) throw new NotFoundException('Salary payment not found');
+    this.workflow.ensureEditable(existing.reviewStatus, 'delete');
 
-    await this.prisma.$transaction(async (tx) => {
-      // 1. Soft-delete the salary payment
-      await tx.salary_payment.update({
-        where: { id },
-        data: { deleted_at: new Date(), deleted_by: userId },
-      });
-
-      // 2. Soft-delete related journal entries so they don't affect reports
-      await tx.transactions_data.updateMany({
-        where: { system_ref: `SAL:${id}`, deleted_at: null },
-        data: { deleted_at: new Date(), deleted_by: userId },
-      });
+    await this.prisma.salary_payment.update({
+      where: { id },
+      data: { deleted_at: new Date(), deleted_by: userId },
     });
-
-    return {
-      message:
-        'Salary payment deleted and journal entries reversed successfully',
-    };
+    return { message: 'Salary payment deleted successfully' };
   }
 }

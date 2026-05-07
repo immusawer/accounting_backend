@@ -10,6 +10,7 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
+import { ReviewStatus } from '@prisma/client';
 import { HrService } from './hr.service';
 import {
   CreateDepartmentDto,
@@ -18,6 +19,8 @@ import {
   CreateSalaryPaymentDto,
 } from './dto/hr.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { PermissionGuard } from '../auth/guards/permission.guard';
+import { RequirePermission } from '../auth/decorators/require-permission.decorator';
 import { AuditLog } from '../audit-log/audit-log.interceptor';
 
 interface AuthRequest extends Request {
@@ -25,7 +28,7 @@ interface AuthRequest extends Request {
 }
 
 @Controller('hr')
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionGuard)
 export class HrController {
   constructor(private readonly service: HrService) {}
 
@@ -92,6 +95,29 @@ export class HrController {
     return this.service.createSalaryPayment(data, req.user.id);
   }
 
+  @RequirePermission('hr.update')
+  @AuditLog({ action: 'UPDATE', module: 'salary' })
+  @Patch('salary-payments/:id')
+  updateSalaryPayment(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() data: Partial<CreateSalaryPaymentDto>,
+    @Req() req: AuthRequest,
+  ) {
+    return this.service.updateSalaryPayment(id, data, req.user.id);
+  }
+
+  @RequirePermission('hr.change_status')
+  @AuditLog({ action: 'UPDATE', module: 'salary' })
+  @Patch('salary-payments/:id/review-status')
+  updateSalaryStatus(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: { status: ReviewStatus },
+    @Req() req: AuthRequest,
+  ) {
+    return this.service.updateSalaryStatus(id, body.status, req.user.id);
+  }
+
+  @RequirePermission('hr.delete')
   @AuditLog({ action: 'DELETE', module: 'salary' })
   @Delete('salary-payments/:id')
   deleteSalaryPayment(

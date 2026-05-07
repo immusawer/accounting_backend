@@ -116,13 +116,7 @@ enum PaymentMethod {
   CREDIT_CARD
 }
 
-// PaymentStatus is a 3-step review workflow:
-//   PENDING   → freshly recorded, no journal entries yet, can be edited/deleted
-//   REVIEWED  → accountant has verified; journal entries have been generated
-//   APPROVED  → final sign-off; no further changes allowed
-//
-// Transitions: PENDING → REVIEWED → APPROVED (one-way).
-// Backward transitions are blocked in the service layer.
+
 enum PaymentStatus {
   PENDING
   REVIEWED
@@ -134,8 +128,13 @@ enum InvoiceTransactionStatus {
   pending_revert
 }
 
-// GeneralJournalCurrency enum removed — currency is now a dynamic String
-// to support any currency from the currency_setting table
+
+enum ReviewStatus {
+  PENDING
+  REVIEWED
+  APPROVED
+}
+
 
 model currency_setting {
   id           Int      @id @default(autoincrement())
@@ -212,7 +211,7 @@ model Customer {
   companyName String?
 
   // Accounting Info
-  currency    String @default("USD")
+  currency    String @default("AFN")
   creditLimit Float  @default(0)
   balance     Float  @default(0)
 
@@ -254,6 +253,9 @@ model product {
   supplier    String?
   unit        String    @default("pcs")
   isActive    Boolean   @default(true)
+
+  reviewStatus ReviewStatus @default(PENDING)
+
   deletedAt   DateTime?
   deletedBy   String?
   createdAt   DateTime  @default(now())
@@ -275,6 +277,8 @@ model stock {
   // Double-entry: which accounts were debited/credited
   debitAccountId  Int
   creditAccountId Int
+
+  reviewStatus ReviewStatus @default(PENDING)
 
   date       DateTime  @default(now())
   created_by Int?
@@ -309,7 +313,7 @@ model employee {
   departmentId Int?
   department   department? @relation(fields: [departmentId], references: [id])
   baseSalary   Float       @default(0)
-  currency     String      @default("USD")
+  currency     String      @default("AFN")
   hireDate     DateTime    @default(now())
   bankAccount  String?
   bankName     String?
@@ -342,8 +346,9 @@ model salary_payment {
   deductions Float               @default(0)
   overtime   Float               @default(0)
   netSalary  Float
-  currency   String              @default("USD")
+  currency   String              @default("AFN")
   status     SalaryPaymentStatus @default(PENDING)
+  reviewStatus ReviewStatus @default(PENDING)
   paidDate   DateTime?
   reference  String?
   notes      String?
@@ -367,11 +372,13 @@ model expense {
   amount      Float
   category    String?
   vendor      String?
-  currency    String  @default("USD")
+  currency    String  @default("AFN")
   reference   String?
 
   debitAccountId  Int
   creditAccountId Int
+
+  reviewStatus ReviewStatus @default(PENDING)
 
   date       DateTime  @default(now())
   created_by Int?
@@ -393,6 +400,7 @@ model Invoice {
   dueDate   DateTime?
 
   status InvoiceStatus @default(DRAFT)
+  reviewStatus ReviewStatus @default(PENDING)
 
   // Money
   subtotal   Float @default(0)
@@ -402,7 +410,7 @@ model Invoice {
   paidAmount Float @default(0)
   balanceDue Float @default(0)
 
-  currency String @default("USD")
+  currency String @default("AFN")
 
   // Notes
   notes String?
@@ -451,7 +459,7 @@ model Payment {
   invoice   Invoice? @relation(fields: [invoiceId], references: [id])
 
   amount   Float
-  currency String @default("USD")
+  currency String @default("AFN")
 
   paymentDate   DateTime      @default(now())
   paymentMethod PaymentMethod
@@ -500,7 +508,7 @@ model general_journal {
   id             Int       @id @default(autoincrement())
   journal_number String    @unique
   journal_date   DateTime  @db.Timestamptz(6)
-  currency       String    @default("USD") @db.VarChar(10)
+  currency       String    @default("AFN") @db.VarChar(10)
   exchange_rate  Decimal   @default(1) @db.Decimal(18, 6)
   remark         String?   @db.VarChar(500)
   created_at     DateTime  @default(now()) @db.Timestamp

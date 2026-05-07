@@ -2,18 +2,60 @@ import {
   BadRequestException,
   Injectable,
   NotFoundException,
+  OnModuleInit,
 } from '@nestjs/common';
 import { InvoiceStatus, PaymentStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { AccountingHelper } from '../accounting/accounting.helper';
+import {
+  ReviewWorkflowService,
+  systemRef,
+} from '../accounting/review-workflow.service';
 import { CreatePaymentDto, UpdatePaymentDto } from './dto/payment.dto';
 
 @Injectable()
-export class PaymentService {
+export class PaymentService implements OnModuleInit {
   constructor(
     private prisma: PrismaService,
-    private accounting: AccountingHelper,
+    private workflow: ReviewWorkflowService,
   ) {}
+
+  onModuleInit() {
+    this.workflow.registerBuilder('PAYMENT', async (id, tx) => {
+      const p = await tx.payment.findUnique({
+        where: { id },
+        include: {
+          customer: { select: { name: true } },
+          invoice: { select: { invoiceNumber: true } },
+        },
+      });
+      if (!p || p.deletedAt) return null;
+      const rate = await this.getRate(p.currency);
+      const narration = `Payment from ${p.customer?.name ?? 'customer'}${
+        p.invoice ? ` for ${p.invoice.invoiceNumber}` : ''
+      }`;
+      return {
+        date: p.paymentDate,
+        voucherNumber: `PMT-${p.id}`,
+        systemRef: systemRef('PAYMENT', p.id),
+        narration,
+        currency: p.currency,
+        exchangeRate: rate,
+        companyId: p.customerId,
+        lines: [
+          {
+            account: this.getDebitAccountRef(p.paymentMethod),
+            debit: p.amount,
+            credit: 0,
+          },
+          {
+            account: { name: 'Accounts Receivable', category: 'ASSET' as const },
+            debit: 0,
+            credit: p.amount,
+          },
+        ],
+      };
+    });
+  }
 
   private async getRate(code: string): Promise<number> {
     const c = await this.prisma.currency_setting.findUnique({
@@ -22,10 +64,6 @@ export class PaymentService {
     return c?.exchangeRate ?? 1;
   }
 
-  /**
-   * Resolve the debit account based on payment method.
-   * CASH → "Cash" account, BANK_TRANSFER/CREDIT_CARD → "Bank" account.
-   */
   private getDebitAccountRef(paymentMethod: string) {
     switch (paymentMethod) {
       case 'CASH':
@@ -71,13 +109,8 @@ export class PaymentService {
     return payment;
   }
 
-  /**
-   * Create a PENDING payment. No journal entries are generated yet —
-   * the user has to explicitly move the payment to REVIEWED to trigger
-   * the double-entry postings.
-   */
   async create(data: CreatePaymentDto, _userId?: number) {
-    const currency = data.currency || 'USD';
+    const currency = data.currency || 'AFN';
     const paymentDate = data.paymentDate
       ? new Date(data.paymentDate)
       : new Date();
@@ -124,25 +157,13 @@ export class PaymentService {
     };
   }
 
-  /**
-   * Edit a payment. Only allowed while status is PENDING — once the
-   * accountant has reviewed / approved the payment, we freeze it to
-   * keep the generated journal entries faithful to what was recorded.
-   */
   async update(id: number, data: UpdatePaymentDto) {
     const existing = await this.prisma.payment.findFirst({
       where: { id, deletedAt: null },
     });
     if (!existing) throw new NotFoundException('Payment not found');
-    if (existing.status !== 'PENDING') {
-      throw new BadRequestException(
-        `Cannot edit a ${existing.status} payment. Revert to PENDING is not allowed — delete and recreate if this was wrong.`,
-      );
-    }
+    this.workflow.ensureEditable(existing.status as any, 'update');
 
-    // If the amount changes and an invoice was linked, re-validate against
-    // the current balance (the invoice's own balance was never touched for
-    // a PENDING payment, so we can compare directly).
     if (data.amount != null && existing.invoiceId) {
       const invoice = await this.prisma.invoice.findUnique({
         where: { id: existing.invoiceId },
@@ -173,10 +194,10 @@ export class PaymentService {
   }
 
   /**
-   * Drive the review workflow:
-   *   PENDING → REVIEWED  : generate double-entry journal + roll invoice balance
-   *   REVIEWED → APPROVED : final sign-off, no side effects
-   * Any other transition is blocked.
+   * Status transitions:
+   *   PENDING ↔ REVIEWED  (forward generates journal + invoice roll; reverse undoes)
+   *   REVIEWED → APPROVED (no side effects)
+   *   APPROVED → PENDING  (reverse undoes journal + invoice roll)
    */
   async updateStatus(id: number, next: PaymentStatus, userId?: number) {
     const existing = await this.prisma.payment.findFirst({
@@ -184,28 +205,30 @@ export class PaymentService {
     });
     if (!existing) throw new NotFoundException('Payment not found');
 
-    const current = existing.status;
-    const allowed: Record<PaymentStatus, PaymentStatus[]> = {
-      PENDING: ['REVIEWED'],
-      REVIEWED: ['APPROVED'],
-      APPROVED: [],
-    };
-    if (!allowed[current].includes(next)) {
-      throw new BadRequestException(
-        `Invalid status transition: ${current} → ${next}. Allowed from ${current}: ${allowed[current].join(', ') || '(none)'}.`,
-      );
-    }
-
     const updated = await this.prisma.$transaction(async (tx) => {
-      // Only PENDING → REVIEWED generates accounting side effects.
-      if (current === 'PENDING' && next === 'REVIEWED') {
-        // 1. Roll the invoice balance forward if this payment is linked.
-        if (existing.invoiceId) {
+      await this.workflow.applyTransition({
+        kind: 'PAYMENT',
+        recordId: id,
+        current: existing.status as any,
+        next: next as any,
+        tx,
+        userId,
+      });
+
+      // Roll invoice balance forward (PENDING → REVIEWED) or backward (any → PENDING).
+      if (existing.invoiceId) {
+        const goingForward =
+          existing.status === 'PENDING' && next === 'REVIEWED';
+        const goingBackward =
+          (existing.status === 'REVIEWED' || existing.status === 'APPROVED') &&
+          next === 'PENDING';
+        if (goingForward || goingBackward) {
           const invoice = await tx.invoice.findUnique({
             where: { id: existing.invoiceId },
           });
           if (invoice && !invoice.deletedAt) {
-            const newPaid = invoice.paidAmount + existing.amount;
+            const delta = goingForward ? existing.amount : -existing.amount;
+            const newPaid = invoice.paidAmount + delta;
             const newBalance = Math.max(0, invoice.total - newPaid);
             const newStatus: InvoiceStatus =
               newBalance <= 0
@@ -223,48 +246,6 @@ export class PaymentService {
             });
           }
         }
-
-        // 2. Post the double-entry journal.
-        const customer = await tx.customer.findUnique({
-          where: { id: existing.customerId },
-          select: { name: true },
-        });
-        const invoice = existing.invoiceId
-          ? await tx.invoice.findUnique({
-              where: { id: existing.invoiceId },
-              select: { invoiceNumber: true },
-            })
-          : null;
-        const narration = `Payment from ${customer?.name ?? 'customer'}${
-          invoice ? ` for ${invoice.invoiceNumber}` : ''
-        }`;
-        const rate = await this.getRate(existing.currency);
-        await this.accounting.createDoubleEntry({
-          date: existing.paymentDate,
-          voucherNumber: `PMT-${existing.id}`,
-          systemRef: `PMT:${existing.id}`,
-          narration,
-          currency: existing.currency,
-          exchangeRate: rate,
-          companyId: existing.customerId,
-          userId,
-          tx,
-          lines: [
-            {
-              account: this.getDebitAccountRef(existing.paymentMethod),
-              debit: existing.amount,
-              credit: 0,
-            },
-            {
-              account: {
-                name: 'Accounts Receivable',
-                category: 'ASSET',
-              },
-              debit: 0,
-              credit: existing.amount,
-            },
-          ],
-        });
       }
 
       return tx.payment.update({
@@ -283,23 +264,13 @@ export class PaymentService {
     };
   }
 
-  /**
-   * Delete a payment. Only PENDING payments can be deleted — REVIEWED
-   * and APPROVED payments have posted journal entries that are audit
-   * records; don't let them be wiped silently.
-   */
   async remove(id: number, deletedBy?: string) {
     const existing = await this.prisma.payment.findFirst({
       where: { id, deletedAt: null },
     });
     if (!existing) throw new NotFoundException('Payment not found');
-    if (existing.status !== 'PENDING') {
-      throw new BadRequestException(
-        `Cannot delete a ${existing.status} payment. Only PENDING payments can be deleted.`,
-      );
-    }
-    // PENDING payments don't have journal entries or an invoice balance
-    // update yet, so nothing to reverse — just soft-delete the row.
+    this.workflow.ensureEditable(existing.status as any, 'delete');
+
     await this.prisma.payment.update({
       where: { id },
       data: { deletedAt: new Date(), deletedBy },

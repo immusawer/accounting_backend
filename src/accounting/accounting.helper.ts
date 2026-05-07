@@ -135,13 +135,55 @@ export class AccountingHelper {
   }
 
   /**
-   * Reverse (soft-delete) all journal entries linked to a system_ref.
+   * Reverse the journal entries linked to a system_ref by inserting OPPOSITE
+   * entries (debit ↔ credit swapped) instead of deleting the originals. This
+   * is the standard accounting reversing-entry approach: the audit trail
+   * keeps both the original and the reversal, and they cancel out in totals.
+   *
+   * Originals get `revert_status='reverted'` and the new opposite rows are
+   * tagged `system_ref='<orig>:REV-<ts>'` plus `revert_status='reverted'` so
+   * future regenerations can run cleanly with the bare system_ref.
    */
-  async reverseEntries(systemRef: string, tx?: any): Promise<void> {
+  async reverseEntries(systemRef: string, tx?: any, userId?: number): Promise<void> {
     const db = tx || this.prisma;
+    const originals = await db.transactions_data.findMany({
+      where: {
+        system_ref: systemRef,
+        deleted_at: null,
+        revert_status: null,
+      },
+    });
+    if (originals.length === 0) return;
+
+    const now = new Date();
+    const reversalRef = `${systemRef}:REV-${now.getTime()}`;
+
+    for (const o of originals) {
+      await db.transactions_data.create({
+        data: {
+          voucher_date: now,
+          voucher_number: o.voucher_number ? `${o.voucher_number}-REV` : null,
+          system_ref: reversalRef,
+          account_id: o.account_id,
+          // Swap debit ↔ credit
+          debit: o.credit,
+          credit: o.debit,
+          base_currency_debit: o.base_currency_credit,
+          base_currency_credit: o.base_currency_debit,
+          currency: o.currency,
+          exchange_rate: o.exchange_rate,
+          narration: o.narration ? `Reversal: ${o.narration}` : 'Reversal entry',
+          remark: `Reversed from ${systemRef}`,
+          company_id: o.company_id,
+          revert_status: 'reverted',
+          created_by: userId ?? o.created_by,
+        },
+      });
+    }
+
     await db.transactions_data.updateMany({
-      where: { system_ref: systemRef, deleted_at: null },
-      data: { deleted_at: new Date() },
+      where: { system_ref: systemRef, revert_status: null, deleted_at: null },
+      data: { revert_status: 'reverted', updated_by: userId },
     });
   }
 }

@@ -2,17 +2,54 @@ import {
   BadRequestException,
   Injectable,
   NotFoundException,
+  OnModuleInit,
 } from '@nestjs/common';
+import { ReviewStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { AccountingHelper } from '../accounting/accounting.helper';
+import {
+  ReviewWorkflowService,
+  systemRef,
+} from '../accounting/review-workflow.service';
 import { CreateInvoiceDto, UpdateInvoiceDto } from './dto/invoice.dto';
 
 @Injectable()
-export class InvoiceService {
+export class InvoiceService implements OnModuleInit {
   constructor(
     private prisma: PrismaService,
-    private accounting: AccountingHelper,
+    private workflow: ReviewWorkflowService,
   ) {}
+
+  onModuleInit() {
+    this.workflow.registerBuilder('INVOICE', async (id, tx) => {
+      const inv = await tx.invoice.findUnique({
+        where: { id },
+        include: { customer: { select: { name: true } } },
+      });
+      if (!inv || inv.deletedAt) return null;
+      const rate = await this.getRate(inv.currency);
+      return {
+        date: inv.issueDate,
+        voucherNumber: inv.invoiceNumber,
+        systemRef: systemRef('INVOICE', inv.id),
+        narration: `Invoice ${inv.invoiceNumber} to ${inv.customer?.name ?? 'Customer'}`,
+        currency: inv.currency,
+        exchangeRate: rate,
+        companyId: inv.customerId,
+        lines: [
+          {
+            account: { name: 'Accounts Receivable', category: 'ASSET' },
+            debit: inv.total,
+            credit: 0,
+          },
+          {
+            account: { name: 'Revenue', category: 'REVENUE' },
+            debit: 0,
+            credit: inv.total,
+          },
+        ],
+      };
+    });
+  }
 
   private async nextInvoiceNumber(): Promise<string> {
     const last = await this.prisma.invoice.findFirst({
@@ -67,29 +104,24 @@ export class InvoiceService {
     }
 
     const invoiceNumber = await this.nextInvoiceNumber();
-    const currency = data.currency || 'USD';
-    const rate = await this.getRate(currency);
+    const currency = data.currency || 'AFN';
 
-    // Look up all products
     const productIds = data.items.map((i) => i.productId);
     const products = await this.prisma.product.findMany({
       where: { id: { in: productIds }, deletedAt: null },
     });
-
     const productMap = new Map(products.map((p) => [p.id, p]));
 
-    // Build line items from products
     let subtotal = 0;
     let totalTax = 0;
     let totalDiscount = 0;
 
     const itemsData = data.items.map((line) => {
       const product = productMap.get(line.productId);
-      if (!product) {
+      if (!product)
         throw new NotFoundException(
           `Product with ID ${line.productId} not found`,
         );
-      }
 
       const unitPrice = line.unitPrice ?? product.price;
       const lineTotal = line.quantity * unitPrice;
@@ -115,81 +147,54 @@ export class InvoiceService {
     const total = subtotal + totalTax - totalDiscount;
     const issueDate = data.issueDate ? new Date(data.issueDate) : new Date();
 
-    const invoice = await this.prisma.$transaction(async (tx) => {
-      const inv = await tx.invoice.create({
-        data: {
-          invoiceNumber,
-          customerId: data.customerId,
-          issueDate,
-          dueDate: data.dueDate ? new Date(data.dueDate) : null,
-          currency,
-          notes: data.notes || null,
-          subtotal,
-          tax: totalTax,
-          discount: totalDiscount,
-          total,
-          paidAmount: 0,
-          balanceDue: total,
-          items: { create: itemsData },
-        },
-        include: {
-          customer: { select: { id: true, name: true, email: true } },
-          items: {
-            include: {
-              product: { select: { id: true, name: true, sku: true } },
-            },
-          },
-        },
-      });
-
-      // Auto-generate double-entry journal entries
-      // Debit: Accounts Receivable (asset increases)
-      // Credit: Revenue (income earned)
-      await this.accounting.createDoubleEntry({
-        date: issueDate,
-        voucherNumber: invoiceNumber,
-        systemRef: `INV:${inv.id}`,
-        narration: `Invoice ${invoiceNumber} to ${inv.customer.name}`,
+    const invoice = await this.prisma.invoice.create({
+      data: {
+        invoiceNumber,
+        customerId: data.customerId,
+        issueDate,
+        dueDate: data.dueDate ? new Date(data.dueDate) : null,
         currency,
-        exchangeRate: rate,
-        companyId: data.customerId,
-        userId,
-        tx,
-        lines: [
-          {
-            account: { name: 'Accounts Receivable', category: 'ASSET' },
-            debit: total,
-            credit: 0,
+        notes: data.notes || null,
+        subtotal,
+        tax: totalTax,
+        discount: totalDiscount,
+        total,
+        paidAmount: 0,
+        balanceDue: total,
+        reviewStatus: 'PENDING',
+        items: { create: itemsData },
+      },
+      include: {
+        customer: { select: { id: true, name: true, email: true } },
+        items: {
+          include: {
+            product: { select: { id: true, name: true, sku: true } },
           },
-          {
-            account: { name: 'Revenue', category: 'REVENUE' },
-            debit: 0,
-            credit: total,
-          },
-        ],
-      });
-
-      return inv;
+        },
+      },
     });
 
-    return { message: 'Invoice created successfully', invoice, userId };
+    return {
+      message: 'Invoice created (pending review)',
+      invoice,
+      userId,
+    };
   }
 
   async update(id: number, data: UpdateInvoiceDto, userId?: number) {
     const existing = await this.prisma.invoice.findFirst({
       where: { id, deletedAt: null },
-      include: { customer: { select: { name: true } } },
     });
     if (!existing) throw new NotFoundException('Invoice not found');
+    this.workflow.ensureEditable(existing.reviewStatus, 'update');
 
     const invoice = await this.prisma.$transaction(async (tx) => {
-      // Update basic fields
       const updateData: any = {};
-      if (data.dueDate !== undefined) updateData.dueDate = data.dueDate ? new Date(data.dueDate) : null;
+      if (data.dueDate !== undefined)
+        updateData.dueDate = data.dueDate ? new Date(data.dueDate) : null;
       if (data.notes !== undefined) updateData.notes = data.notes || null;
       if (data.currency !== undefined) updateData.currency = data.currency;
 
-      // If items provided, recalculate totals
       if (data.items && data.items.length > 0) {
         const productIds = data.items.map((i) => i.productId);
         const products = await tx.product.findMany({
@@ -203,9 +208,10 @@ export class InvoiceService {
 
         const itemsData = data.items.map((line) => {
           const product = productMap.get(line.productId);
-          if (!product) {
-            throw new NotFoundException(`Product with ID ${line.productId} not found`);
-          }
+          if (!product)
+            throw new NotFoundException(
+              `Product with ID ${line.productId} not found`,
+            );
           const unitPrice = line.unitPrice ?? product.price;
           const lineTotal = line.quantity * unitPrice;
           const lineTax = lineTotal * (product.taxRate / 100);
@@ -228,10 +234,8 @@ export class InvoiceService {
         });
 
         const total = subtotal + totalTax - totalDiscount;
-        const paidAmount = existing.paidAmount;
-        const balanceDue = total - paidAmount;
+        const balanceDue = total - existing.paidAmount;
 
-        // Delete old items and create new ones
         await tx.invoiceItem.deleteMany({ where: { invoiceId: id } });
 
         updateData.subtotal = subtotal;
@@ -240,35 +244,6 @@ export class InvoiceService {
         updateData.total = total;
         updateData.balanceDue = balanceDue;
         updateData.items = { create: itemsData };
-
-        // Reverse old journal entries and create new ones
-        const currency = data.currency || existing.currency;
-        const rate = await this.getRate(currency);
-
-        await this.accounting.reverseEntries(`INV:${id}`, tx);
-        await this.accounting.createDoubleEntry({
-          date: existing.issueDate,
-          voucherNumber: existing.invoiceNumber,
-          systemRef: `INV:${id}`,
-          narration: `Invoice ${existing.invoiceNumber} to ${existing.customer?.name ?? 'Customer'}`,
-          currency,
-          exchangeRate: rate,
-          companyId: existing.customerId,
-          userId,
-          tx,
-          lines: [
-            {
-              account: { name: 'Accounts Receivable', category: 'ASSET' },
-              debit: total,
-              credit: 0,
-            },
-            {
-              account: { name: 'Revenue', category: 'REVENUE' },
-              debit: 0,
-              credit: total,
-            },
-          ],
-        });
       }
 
       return tx.invoice.update({
@@ -285,7 +260,33 @@ export class InvoiceService {
       });
     });
 
-    return { message: 'Invoice updated successfully', invoice };
+    return { message: 'Invoice updated successfully', invoice, userId };
+  }
+
+  async updateStatus(id: number, next: ReviewStatus, userId?: number) {
+    const existing = await this.prisma.invoice.findFirst({
+      where: { id, deletedAt: null },
+    });
+    if (!existing) throw new NotFoundException('Invoice not found');
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      await this.workflow.applyTransition({
+        kind: 'INVOICE',
+        recordId: id,
+        current: existing.reviewStatus,
+        next,
+        tx,
+        userId,
+      });
+      return tx.invoice.update({
+        where: { id },
+        data: { reviewStatus: next },
+        include: {
+          customer: { select: { id: true, name: true, email: true } },
+        },
+      });
+    });
+    return { message: `Invoice moved to ${next}`, invoice: updated };
   }
 
   async remove(id: number, deletedBy?: string) {
@@ -293,17 +294,12 @@ export class InvoiceService {
       where: { id, deletedAt: null },
     });
     if (!existing) throw new NotFoundException('Invoice not found');
+    this.workflow.ensureEditable(existing.reviewStatus, 'delete');
 
-    await this.prisma.$transaction(async (tx) => {
-      await tx.invoice.update({
-        where: { id },
-        data: { deletedAt: new Date(), deletedBy },
-      });
-
-      // Reverse journal entries
-      await this.accounting.reverseEntries(`INV:${id}`, tx);
+    await this.prisma.invoice.update({
+      where: { id },
+      data: { deletedAt: new Date(), deletedBy },
     });
-
     return { message: 'Invoice deleted successfully' };
   }
 }

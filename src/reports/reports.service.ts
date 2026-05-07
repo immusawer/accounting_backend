@@ -10,7 +10,7 @@ export class ReportsService {
     const s = await this.prisma.app_setting.findUnique({
       where: { key: 'baseCurrency' },
     });
-    return s?.value ?? 'USD';
+    return s?.value ?? 'AFN';
   }
 
   async profitAndLoss(from?: string, to?: string) {
