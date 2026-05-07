@@ -88,7 +88,8 @@ INSERT INTO permissions (name, label, group_name, created_at) VALUES
   ('create', 'Create Employees & Salary', 'hr', NOW()),
   ('update', 'Update Employees', 'hr', NOW()),
   ('delete', 'Delete Employees & Salary', 'hr', NOW()),
-  ('change_status', 'Change Salary Status', 'hr', NOW())
+  ('change_status', 'Change Salary Status', 'hr', NOW()),
+  ('salary_report_view', 'View Salary Report', 'hr', NOW())
 
 ON CONFLICT (name, group_name) DO NOTHING;
 
